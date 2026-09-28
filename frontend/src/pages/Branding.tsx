@@ -26,7 +26,7 @@ interface Variant {
   glow?: string                       // 名字下方的发光线条 hex
 }
 
-// 同一个名字(BRAND_NAME)在 4 种风格语言里的呈现
+// 同一个名字 (BRAND_NAME) 在 4 种风格语言里的呈现
 // 长字符串自动用更小字号 + 更窄字距,免得撑爆卡片;但风格语言(字体/字重/配色/图标)保持不变
 const VARIANTS: Variant[] = [
   {

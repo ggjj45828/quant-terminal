@@ -134,6 +134,27 @@ ghcr.io/你的用户名/quant-terminal:latest
 
 ---
 
+## ⚠️ 已修复：TS2307 Cannot find module（重要）
+
+如果你第一次构建报了这个错：
+
+```
+TS2307: Cannot find module '@/components/screener/StrategyStoreDialog'
+```
+
+**原因**：我最初给你的源码包解压时损坏了，少了 3 个文件、另有几个文件被截断。
+**已修复**：本包已用上游源码全新重建并校验（全部文件齐全、大小逐一对齐、本地导入 0 失败）。
+
+**如果你之前已经把旧包传上 GitHub 了**，请这样做：
+
+1. 下载本修复包，解压后**整体覆盖**你本地的 `D:\tickflow-stock-panel` 文件夹
+   （所有文件都选「替换」）
+2. 打开 **GitHub Desktop**，会自动列出改动（几百个）
+3. Summary 填 `fix` → **Commit to main** → **Push origin**
+4. 回到网页 **Actions** → **Build Z4Pro Image** → **Run workflow** 重新构建
+
+---
+
 ## 常见问题
 
 **Q：Actions 里找不到 "Build Z4Pro Image"？**
