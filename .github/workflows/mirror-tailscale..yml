@@ -1,0 +1,56 @@
+# ============================================================
+#  把 tailscale 镜像搬到你的 GHCR
+#  用途: 本地/极空间拉 Docker Hub 超时时, 让 GitHub 服务器代拉,
+#        推送到 ghcr.io/你的用户名/tailscale:latest
+#        之后极空间改从 GHCR 拉, 不再访问 Docker Hub
+# ============================================================
+
+name: Mirror Tailscale
+
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/tailscale
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 拉取并重新打标
+        run: |
+          set -e
+          echo "从 Docker Hub 拉取 tailscale..."
+          docker pull tailscale/tailscale:latest
+
+          echo "重新打标为 GHCR 地址..."
+          docker tag tailscale/tailscale:latest \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+          echo "推送到 GHCR..."
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+          echo "完成"
+
+      - name: 输出结果
+        run: |
+          echo "============================================"
+          echo " 搬运完成!"
+          echo ""
+          echo " 极空间拉取地址(复制):"
+          echo "   ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo ""
+          echo " 记得: Packages 里把这个包改成 Public"
+          echo "============================================"
