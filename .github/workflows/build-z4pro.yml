@@ -1,0 +1,69 @@
+# ============================================================
+#  Z4Pro 专用云端构建 —— 不用在本地装 Docker
+#
+#  原理: 把代码传到 GitHub, 让 GitHub 的服务器帮你构建镜像,
+#        构建好自动推送到 GHCR, 极空间直接"自定义拉取"即可。
+#
+#  使用前只需做一件事(见下方注释): 开启仓库的写入权限
+# ============================================================
+
+name: Build Z4Pro Image
+
+on:
+  workflow_dispatch:      # 手动触发(推荐): 仓库页面点一下就构建
+  push:
+    branches: [z4pro]     # 也可以推到 z4pro 分支自动触发
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/quant-terminal
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # ⚠️ 关键: 必须给 GITHUB_TOKEN 写权限, 否则推不上去
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送 (Z4Pro = linux/amd64 + backtest)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            BACKEND_EXTRAS=backtest
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:z4pro
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 完成提示
+        run: |
+          echo "============================================"
+          echo " 构建完成!"
+          echo ""
+          echo " 你的镜像地址(复制到极空间拉取):"
+          echo "   ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo ""
+          echo " 极空间操作:"
+          echo "   Docker → 镜像 → 仓库 → 自定义拉取"
+          echo "============================================"

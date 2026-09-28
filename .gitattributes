@@ -1,0 +1,44 @@
+# ============================================================
+#  统一换行符规则 —— 避免 Windows 上 900+ 文件假改动
+#  上传 GitHub 前请先应用本文件(见 GitHub云端构建指南.md 附录)
+# ============================================================
+
+# 默认: 文本文件在仓库中统一存为 LF
+* text=auto eol=lf
+
+# 明确指定常见文本格式
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.scss text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.lock text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+.gitignore text eol=lf
+
+# Windows 批处理必须是 CRLF(否则 CMD 解析异常)
+*.bat text eol=crlf
+
+# 二进制文件: 不做任何换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text eol=lf
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.parquet binary
+*.duckdb binary
+*.zip binary

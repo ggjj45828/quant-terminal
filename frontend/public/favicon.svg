@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- 与 src/components/Logo.tsx 同款造型:圆角终端框 + 上升折线 + 递增柱 -->
+  <!-- 线条加粗: 浏览器 tab 尺寸很小, 需要更粗才能看清 -->
+  <!-- 外层圆角终端框 -->
+  <rect x="3" y="3" width="26" height="26" rx="7" stroke="#7C3AED" stroke-width="2.5" stroke-opacity="0.45"/>
+  <!-- 上升折线 -->
+  <path d="M8 19 L13 13.5 L17 16 L22.5 9" stroke="#7C3AED" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 折线末端箭头 -->
+  <path d="M17.5 9 L22.5 9 L22.5 14" stroke="#7C3AED" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 底部递增柱 -->
+  <rect x="8" y="24" width="3" height="3" rx="0.75" fill="#7C3AED" fill-opacity="0.6"/>
+  <rect x="14.5" y="22" width="3" height="5" rx="0.75" fill="#7C3AED" fill-opacity="0.8"/>
+  <rect x="21" y="19.5" width="3" height="7.5" rx="0.75" fill="#7C3AED"/>
+</svg>

@@ -1,0 +1,48 @@
+name: QuantTerminal
+options:
+  bundleIdPrefix: com.yourname
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    PRODUCT_NAME: Quant Terminal
+    MARKETING_VERSION: 1.0.0
+    CURRENT_PROJECT_VERSION: 1
+    SWIFT_VERSION: 5.9
+    TARGETED_DEVICE_FAMILY: 1,2
+    INFOPLIST_FILE: QuantTerminal/Info.plist
+    DEVELOPMENT_TEAM: YOUR_TEAM_ID
+    SUPPORTS_MACCATALYST: NO
+  configs:
+    debug: DEBUG
+    release:
+
+targets:
+  QuantTerminal:
+    type: application
+    platform: iOS
+    sources:
+      - path: QuantTerminal
+        excludes:
+          - "Info.plist"
+    resources:
+      - path: QuantTerminal/Assets.xcassets
+    info:
+      path: QuantTerminal/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.quantterminal
+    entitlements:
+      path: QuantTerminal/QuantTerminal.entitlements
+
+schemes:
+  QuantTerminal:
+    build:
+      targets:
+        QuantTerminal: all
+    run:
+      config: debug
+    archive:
+      config: release

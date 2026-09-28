@@ -1,0 +1,40 @@
+# 极空间 Z4Pro 专用 Compose
+# 直接粘贴到「Docker → Compose → 新增项目」, 或"从本地导入"本文件
+#
+# ✅ 已按 Z4Pro 确认:
+#    - 架构 x86_64 (N97 / N305 均为 Intel x86), 镜像按 linux/amd64 构建
+#    - CPU 支持 AVX2 + FMA3, 不需要 legacy-cpu (N97/N305/N150/N355 全部支持)
+#    - 内存 8GB / 16GB 均够用
+#
+# ⚠️ 使用前必改两处:
+#   1. volumes 里的 "请替换成极空间真实路径/data"
+#      —— 面板里点「查询路径」, 进 Docker/quant-terminal/data 复制, 形如:
+#         /tmp/zfsv3/sata11/XXXXXX/data/Docker/quant-terminal/data
+#   2. AUTH_PASSWORD —— 设成你自己的密码(至少 6 位)
+#
+# 可选: TICKFLOW_API_KEY 填你自己的 Key(留空=免费档); AI_API_KEY 填 DeepSeek Key
+
+services:
+  app:
+    image: quant-terminal:latest
+    container_name: Quant_Terminal
+    ports:
+      - "3018:3018"
+    environment:
+      # 数据目录(容器内固定路径, 不要改)
+      - DATA_DIR=/app/data
+      - TZ=Asia/Shanghai
+      # 依赖组合: 带 backtest(回测功能); Z4Pro 支持 AVX2 故无需 legacy-cpu
+      - BACKEND_EXTRAS=backtest
+      # 行情数据源 Key —— 留空 = 免费档, 选股/回测/监控全可用
+      - TICKFLOW_API_KEY=
+      # AI 功能(策略生成/复盘) —— 留空则不启用 AI
+      - AI_PROVIDER=openai_compat
+      - AI_BASE_URL=https://api.deepseek.com/v1
+      - AI_API_KEY=
+      - AI_MODEL=deepseek-chat
+      # 访问密码 —— 务必设置! 用极空间远程访问暴露到外网时不设密码谁都能打开
+      - AUTH_PASSWORD=请改成你自己的密码
+    volumes:
+      - 请替换成极空间真实路径/data:/app/data
+    restart: unless-stopped

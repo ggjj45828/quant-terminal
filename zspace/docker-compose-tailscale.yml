@@ -1,0 +1,37 @@
+# Tailscale 容器 —— 手机异地访问极空间上的 Quant Terminal
+#
+# 用途: 给手机和极空间组建加密虚拟局域网。
+#       装好后手机无论在哪, 访问 http://192.168.x.x:3018 都跟在家一模一样。
+#       免费 / 点对点直连 / 不用公网IP / 不用端口映射。
+#
+# ⚠️ 用前必改两处:
+#   1. TS_AUTHKEY  —— 去 https://login.tailscale.com/admin/settings/keys 生成
+#   2. TS_ROUTES   —— 改成你家网段 (192.168.1.x → 192.168.1.0/24)
+#
+# 极空间面板手动填法(若面板不支持 compose 高级项):
+#   网络   = host 模式
+#   文件夹 = Docker/tailscale/var/lib      → /var/lib
+#            Docker/tailscale/dev/net/tun  → /dev/net/tun
+#   环境变量 = TS_AUTHKEY / TS_ROUTES / TS_STATE_DIR
+#   能力(Capabilities) = NET_ADMIN / SYS_MODULE
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    hostname: z4pro-quant              # 设备名, 会显示在 Tailscale 后台
+    network_mode: host                 # 必须 host, 否则拿不到局域网路由
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      # 在 https://login.tailscale.com/admin/settings/keys 生成, 勾选 Reusable
+      - TS_AUTHKEY=tskey-auth-xxxxxxxxxxxxxxxx
+      # 你家网段 —— 手机靠这条路由访问到局域网里的 NAS
+      - TS_ROUTES=192.168.1.0/24
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_EXTRA_ARGS=--advertise-exit-node=false
+    volumes:
+      - 请替换成极空间真实路径/tailscale/var/lib:/var/lib
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
