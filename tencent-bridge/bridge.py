@@ -49,12 +49,16 @@ GET /minute          分钟K; ?symbols=&period=m5&count=
 -----------------------------------------------------------------------------
 环境变量
 -----------------------------------------------------------------------------
-PORT             监听端口, 默认 8899
-TENCENT_TIMEOUT  上游超时秒, 默认 30 (极空间网络慢时可调大)
-DEFAULT_SYMBOLS  显式标的池, 逗号分隔, 如 "600000.SH,510300.SH,159915.SZ"
-AUTO_SCAN        1 = 启动时后台探测全市场 ETF (默认 1)
-SCAN_ETF         1 = 探测 ETF 代码段 (默认 1)
-POOL_MAX         标的池上限, 默认 3000
+PORT              监听端口, 默认 8899
+TENCENT_TIMEOUT   上游超时秒, 默认 30 (极空间网络慢时可调大)
+DEFAULT_SYMBOLS   显式标的池, 逗号分隔, 如 "600000.SH,510300.SH,159915.SZ"
+AUTO_SCAN         1 = 启动时后台探测全市场 ETF (默认 1)
+SCAN_ETF          1 = 探测 ETF 代码段 (默认 1)
+POOL_MAX          标的池上限, 默认 3000
+REALTIME_LIMIT    单次全量快照最多返回数, 默认 800
+CACHE_TTL         缓存有效秒数, 默认 60 (面板读缓存, 不阻塞)
+REFRESH_INTERVAL  后台刷新间隔秒, 默认 30
+STALE_ON_ERROR    上游失败时是否返回过期缓存, 默认 1
 """
 from __future__ import annotations
 
@@ -76,6 +80,13 @@ POOL_MAX = int(os.getenv("POOL_MAX", "3000"))
 # 池很大时(全市场 ETF 上千只)逐批查询会拖长响应时间,
 # 超过面板 timeout 会被判超时, 所以这里设上限。
 REALTIME_LIMIT = int(os.getenv("REALTIME_LIMIT", "800"))
+
+# ---- 缓存(v3 核心: 让面板永远不等网络) ----
+# 实测腾讯接口单次响应可达 15~36 秒, 面板同步等待必然超时。
+# 所以: 后台线程定时刷新缓存, /realtime 只读缓存立即返回。
+CACHE_TTL = float(os.getenv("CACHE_TTL", "60"))
+REFRESH_INTERVAL = float(os.getenv("REFRESH_INTERVAL", "30"))
+STALE_ON_ERROR = os.getenv("STALE_ON_ERROR", "1") == "1"
 
 UA = os.getenv(
     "TENCENT_UA",
@@ -377,6 +388,99 @@ def fetch_realtime_all() -> list[dict]:
     return out
 
 
+# ===========================================================================
+# 缓存层 (v3): 后台刷新 + 同步命中, 面板不再等待上游
+# ===========================================================================
+
+_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_CACHE_LOCK = threading.Lock()
+_last_refresh = {"ts": 0.0, "ok": False, "error": "", "rows": 0, "ms": 0}
+
+
+def _cache_key(codes: list[str]) -> str:
+    return ",".join(codes)
+
+
+def _cache_get(key: str):
+    """返回 (rows, age_seconds); 无缓存或过期返回 (None, None)。"""
+    with _CACHE_LOCK:
+        ent = _CACHE.get(key)
+    if not ent:
+        return None, None
+    ts, rows = ent
+    age = time.time() - ts
+    if age <= CACHE_TTL:
+        return rows, age
+    return rows, age  # 过期但仍返回, 由调用方决定
+
+
+def _cache_put(key: str, rows: list[dict]) -> None:
+    with _CACHE_LOCK:
+        _CACHE[key] = (time.time(), rows)
+
+
+def realtime_cached(codes: list[str]) -> tuple[list[dict], bool]:
+    """优先读缓存。
+
+    返回 (rows, from_cache)。
+    缓存新鲜 -> 直接返回, 不碰网络(毫秒级)。
+    缓存过期/缺失 -> 同步拉一次(慢), 失败时退而返回过期缓存。
+    """
+    key = _cache_key(codes)
+    rows, age = _cache_get(key)
+    if rows is not None and age is not None and age <= CACHE_TTL:
+        return rows, True
+
+    try:
+        fresh = []
+        for i in range(0, len(codes), BATCH_SIZE):
+            try:
+                fresh.extend(fetch_realtime_batch(codes[i:i + BATCH_SIZE]))
+            except Exception as e:  # noqa: BLE001
+                print(f"[realtime] 批次 {i} 失败: {e}", flush=True)
+        if fresh:
+            _cache_put(key, fresh)
+            return fresh, False
+    except Exception as e:  # noqa: BLE001
+        print(f"[realtime] 拉取失败: {e}", flush=True)
+
+    # 上游失败: 有旧数据就用旧的, 比报错强
+    if STALE_ON_ERROR and rows:
+        return rows, True
+    return [], False
+
+
+def refresh_worker() -> None:
+    """后台定时刷新标的池缓存, 让面板请求永远命中新鲜缓存。"""
+    while True:
+        codes = POOL.snapshot()[:REALTIME_LIMIT]
+        if not codes:
+            time.sleep(REFRESH_INTERVAL)
+            continue
+        t0 = time.time()
+        try:
+            rows = []
+            for i in range(0, len(codes), BATCH_SIZE):
+                try:
+                    rows.extend(fetch_realtime_batch(codes[i:i + BATCH_SIZE]))
+                except Exception as e:  # noqa: BLE001
+                    print(f"[refresh] 批次 {i} 失败: {e}", flush=True)
+            if rows:
+                _cache_put(_cache_key(codes), rows)
+                _last_refresh.update({
+                    "ts": time.time(), "ok": True, "error": "",
+                    "rows": len(rows), "ms": int((time.time() - t0) * 1000),
+                })
+                print(f"[refresh] 更新 {len(rows)} 条, 耗时 {_last_refresh['ms']}ms",
+                      flush=True)
+            else:
+                _last_refresh.update({"ok": False, "error": "空数据"})
+        except Exception as e:  # noqa: BLE001
+            _last_refresh.update({"ok": False, "error": str(e)})
+            print(f"[refresh] 异常: {e}", flush=True)
+        time.sleep(REFRESH_INTERVAL)
+
+
 def _get_json(url: str, fallback: str | None = None) -> dict:
     targets = [url] + ([fallback] if fallback else [])
     last = None
@@ -472,9 +576,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/health":
             self._json(200, {
-                "ok": True, "source": "tencent", "version": "2.0",
+                "ok": True, "source": "tencent", "version": "2.1",
                 "pool_size": POOL.size(), "pool_ready": POOL.ready,
                 "scanning": POOL.scanning, "scan_error": POOL.error,
+                "cache_ttl": CACHE_TTL, "refresh_interval": REFRESH_INTERVAL,
+                "last_refresh": dict(_last_refresh),
             })
             return
 
@@ -489,14 +595,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/realtime":
             raw_symbols = (qs.get("symbols") or [""])[0]
             symbols = [s.strip() for s in raw_symbols.split(",") if s.strip()]
-            try:
-                if symbols:
-                    rows = fetch_realtime_batch([panel_to_tencent(s) for s in symbols])
-                else:
-                    # 面板 realtime 契约: 不传 symbols = 要全市场快照
-                    rows = fetch_realtime_all()
-            except Exception as e:  # noqa: BLE001
-                self._fail(502, f"上游请求失败: {e}")
+            codes = ([panel_to_tencent(s) for s in symbols]
+                     if symbols else POOL.snapshot()[:REALTIME_LIMIT])
+            rows, hit = realtime_cached(codes)
+            # 全空且后台从未成功 -> 明确报错, 便于排查
+            if not rows and not _last_refresh["ok"]:
+                self._json(200, rows)
                 return
             self._json(200, rows)
             return
@@ -556,8 +660,14 @@ def main() -> None:
     if AUTO_SCAN and not os.getenv("DEFAULT_SYMBOLS"):
         threading.Thread(target=scan_worker, daemon=True).start()
         print("[bridge] 后台探测已启动", flush=True)
+
+    # 后台定时刷新缓存 —— 面板请求只读缓存, 不再等待上游
+    threading.Thread(target=refresh_worker, daemon=True).start()
+    print(f"[bridge] 缓存刷新已启动 (间隔 {REFRESH_INTERVAL}s, TTL {CACHE_TTL}s)",
+          flush=True)
+
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"[bridge] v2 监听 0.0.0.0:{PORT}", flush=True)
+    print(f"[bridge] v2.1 监听 0.0.0.0:{PORT}", flush=True)
     server.serve_forever()
 
 
