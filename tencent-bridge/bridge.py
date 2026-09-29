@@ -87,6 +87,8 @@ REALTIME_LIMIT = int(os.getenv("REALTIME_LIMIT", "800"))
 CACHE_TTL = float(os.getenv("CACHE_TTL", "60"))
 REFRESH_INTERVAL = float(os.getenv("REFRESH_INTERVAL", "30"))
 STALE_ON_ERROR = os.getenv("STALE_ON_ERROR", "1") == "1"
+# 冷启动/缓存缺失时最多拉多少只就返回, 避免面板请求卡在全池拉取上
+COLD_LIMIT = int(os.getenv("COLD_LIMIT", "200"))
 
 UA = os.getenv(
     "TENCENT_UA",
@@ -397,8 +399,13 @@ _CACHE_LOCK = threading.Lock()
 _last_refresh = {"ts": 0.0, "ok": False, "error": "", "rows": 0, "ms": 0}
 
 
-def _cache_key(codes: list[str]) -> str:
-    return ",".join(codes)
+def _cache_key(codes: list[str], is_pool: bool = False) -> str:
+    """缓存键。
+
+    全池请求固定用 "POOL" 做键 —— 因为后台扫描会让池不断变大,
+    若用代码列表拼键, 键每次都变, 缓存永远命中不了(这是 v2.1 的隐藏 bug)。
+    """
+    return "POOL" if is_pool else ",".join(sorted(codes))
 
 
 def _cache_get(key: str):
@@ -419,30 +426,33 @@ def _cache_put(key: str, rows: list[dict]) -> None:
         _CACHE[key] = (time.time(), rows)
 
 
-def realtime_cached(codes: list[str]) -> tuple[list[dict], bool]:
+def realtime_cached(codes: list[str], is_pool: bool = False) -> tuple[list[dict], bool]:
     """优先读缓存。
 
     返回 (rows, from_cache)。
     缓存新鲜 -> 直接返回, 不碰网络(毫秒级)。
-    缓存过期/缺失 -> 同步拉一次(慢), 失败时退而返回过期缓存。
+    缓存缺失(冷启动) -> 只拉 COLD_LIMIT 只就返回, 绝不拉全池,
+                        保证面板永远在几秒内拿到响应。
     """
-    key = _cache_key(codes)
+    key = _cache_key(codes, is_pool)
     rows, age = _cache_get(key)
     if rows is not None and age is not None and age <= CACHE_TTL:
         return rows, True
 
+    # 冷启动: 只拉前 COLD_LIMIT 只, 快速给出响应, 剩下的交给后台线程
+    head = codes[:COLD_LIMIT]
     try:
         fresh = []
-        for i in range(0, len(codes), BATCH_SIZE):
+        for i in range(0, len(head), BATCH_SIZE):
             try:
-                fresh.extend(fetch_realtime_batch(codes[i:i + BATCH_SIZE]))
+                fresh.extend(fetch_realtime_batch(head[i:i + BATCH_SIZE]))
             except Exception as e:  # noqa: BLE001
                 print(f"[realtime] 批次 {i} 失败: {e}", flush=True)
         if fresh:
             _cache_put(key, fresh)
             return fresh, False
     except Exception as e:  # noqa: BLE001
-        print(f"[realtime] 拉取失败: {e}", flush=True)
+        print(f"[realtime] 冷启动拉取失败: {e}", flush=True)
 
     # 上游失败: 有旧数据就用旧的, 比报错强
     if STALE_ON_ERROR and rows:
@@ -451,28 +461,40 @@ def realtime_cached(codes: list[str]) -> tuple[list[dict], bool]:
 
 
 def refresh_worker() -> None:
-    """后台定时刷新标的池缓存, 让面板请求永远命中新鲜缓存。"""
+    """后台定时刷新标的池缓存, 让面板请求永远命中新鲜缓存。
+
+    关键: **每批完成就写缓存**(增量), 而不是等全部批次跑完。
+    池子 2000 只时全量要几分钟, 等全跑完再写缓存的话,
+    这段时间内缓存一直是空的, 面板请求就会落到慢路径 → 超时。
+    """
     while True:
         codes = POOL.snapshot()[:REALTIME_LIMIT]
         if not codes:
             time.sleep(REFRESH_INTERVAL)
             continue
         t0 = time.time()
+        key = _cache_key(codes, is_pool=True)
+        rows: list[dict] = []
         try:
-            rows = []
             for i in range(0, len(codes), BATCH_SIZE):
                 try:
-                    rows.extend(fetch_realtime_batch(codes[i:i + BATCH_SIZE]))
+                    part = fetch_realtime_batch(codes[i:i + BATCH_SIZE])
                 except Exception as e:  # noqa: BLE001
                     print(f"[refresh] 批次 {i} 失败: {e}", flush=True)
+                    continue
+                if part:
+                    rows.extend(part)
+                    # 增量写缓存: 第一批完成即可对外服务
+                    _cache_put(key, list(rows))
+                    _last_refresh.update({
+                        "ts": time.time(), "ok": True, "error": "",
+                        "rows": len(rows), "ms": int((time.time() - t0) * 1000),
+                    })
+                    print(f"[refresh] 增量 {len(rows)} 条 "
+                          f"({i + BATCH_SIZE}/{len(codes)})", flush=True)
             if rows:
-                _cache_put(_cache_key(codes), rows)
-                _last_refresh.update({
-                    "ts": time.time(), "ok": True, "error": "",
-                    "rows": len(rows), "ms": int((time.time() - t0) * 1000),
-                })
-                print(f"[refresh] 更新 {len(rows)} 条, 耗时 {_last_refresh['ms']}ms",
-                      flush=True)
+                print(f"[refresh] 本轮完成 {len(rows)} 条, "
+                      f"耗时 {int((time.time() - t0) * 1000)}ms", flush=True)
             else:
                 _last_refresh.update({"ok": False, "error": "空数据"})
         except Exception as e:  # noqa: BLE001
@@ -527,9 +549,37 @@ def _iso_minute(raw: str):
     return s or None
 
 
-def fetch_minute(tcode: str, period: str = "m5", count: int = 320) -> list[dict]:
-    """分钟K。m1/m5/m15/m30/m60, 只有最近约 5 个交易日。"""
-    period = period if period in ("m1", "m5", "m15", "m30", "m60") else "m5"
+def _norm_freq(raw: str) -> str:
+    """把面板口径的周期归一化成腾讯的周期代码。
+
+    面板传的是 "1m" / "5m" / "15m" / "30m" / "60m"(见 kline_sync 里 freq="1m"),
+    腾讯要的是 m1 / m5 / m15 / m30 / m60。
+    不归一化时 "1m" 无效会静默退化成 m5 —— 分时图就变成 5 分钟一根了。
+    """
+    s = (raw or "").strip().lower()
+    table = {
+        "1m": "m1", "m1": "m1", "1": "m1", "1min": "m1",
+        "5m": "m5", "m5": "m5", "5": "m5", "5min": "m5",
+        "15m": "m15", "m15": "m15", "15": "m15",
+        "30m": "m30", "m30": "m30", "30": "m30",
+        "60m": "m60", "m60": "m60", "60": "m60",
+    }
+    return table.get(s, "m5")
+
+
+def fetch_minute(
+    tcode: str,
+    period: str = "m5",
+    count: int = 320,
+    start: str = "",
+    end: str = "",
+) -> list[dict]:
+    """分钟K。m1 为真分时。腾讯只给最近约 5 个交易日。
+
+    start/end 支持 "2026-09-29 09:25:00" 或 "2026-09-29" 形式, 用于把窗口
+    限制在面板请求的那个交易日(面板默认拉今天)。
+    """
+    period = _norm_freq(period)
     param = f"{tcode},{period},,{count}"
     payload = _get_json(
         f"{MKLINE_URL}?{urllib.parse.urlencode({'param': param})}",
@@ -537,18 +587,53 @@ def fetch_minute(tcode: str, period: str = "m5", count: int = 320) -> list[dict]
     )
     node = ((payload or {}).get("data") or {}).get(tcode) or {}
     rows = node.get(period) or []
+
+    lo = _minute_bound(start, False)
+    hi = _minute_bound(end, True)
+
     out = []
     for r in rows:
         if not isinstance(r, list) or len(r) < 6:
             continue
+        dt = _iso_minute(str(r[0]))
+        if lo and dt and dt < lo:
+            continue
+        if hi and dt and dt > hi:
+            continue
+        close = _f(r[2])
+        volume = _f(r[5])
+        # 腾讯分钟接口只给 6 个字段, 没有成交额。
+        # amount 是面板 minute 数据集的必填字段, 全 None 会让下游列整列为空,
+        # 这里用「成交量(手) × 收盘价 × 100」估算, 保证列有值。
+        amount = None
+        if close is not None and volume is not None:
+            amount = round(volume * 100 * close, 2)
         out.append({
             "symbol": tencent_to_panel(_pure(tcode), tcode),
-            "datetime": _iso_minute(str(r[0])),
-            "open": _f(r[1]), "close": _f(r[2]),
-            "high": _f(r[3]), "low": _f(r[4]), "volume": _f(r[5]),
-            "amount": None,
+            "datetime": dt,
+            "open": _f(r[1]), "close": close,
+            "high": _f(r[3]), "low": _f(r[4]), "volume": volume,
+            "amount": amount,
         })
     return out
+
+
+def _minute_bound(value: str, is_end: bool) -> str:
+    """把起止时间规范成可比较的字符串。
+
+    面板传的可能是 ISO8601("2026-09-29T09:25:00+08:00")或纯日期。
+    这里统一成 "YYYY-MM-DD HH:MM:SS" 便于字典序比较。
+    """
+    s = (value or "").strip().replace("T", " ")
+    if not s:
+        return ""
+    # 去掉时区尾巴
+    for tail in ("+08:00", "+0800", "Z"):
+        if s.endswith(tail):
+            s = s[: -len(tail)].strip()
+    if len(s) == 10:  # 纯日期
+        s = f"{s} 15:00:00" if is_end else f"{s} 09:25:00"
+    return s[:19]
 
 
 # ===========================================================================
@@ -556,7 +641,7 @@ def fetch_minute(tcode: str, period: str = "m5", count: int = 320) -> list[dict]
 # ===========================================================================
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "tencent-bridge/2.0"
+    server_version = "tencent-bridge/2.3"
 
     def _json(self, code: int, obj) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -576,7 +661,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/health":
             self._json(200, {
-                "ok": True, "source": "tencent", "version": "2.1",
+                "ok": True, "source": "tencent", "version": "2.3",
                 "pool_size": POOL.size(), "pool_ready": POOL.ready,
                 "scanning": POOL.scanning, "scan_error": POOL.error,
                 "cache_ttl": CACHE_TTL, "refresh_interval": REFRESH_INTERVAL,
@@ -597,7 +682,7 @@ class Handler(BaseHTTPRequestHandler):
             symbols = [s.strip() for s in raw_symbols.split(",") if s.strip()]
             codes = ([panel_to_tencent(s) for s in symbols]
                      if symbols else POOL.snapshot()[:REALTIME_LIMIT])
-            rows, hit = realtime_cached(codes)
+            rows, hit = realtime_cached(codes, is_pool=not symbols)
             # 全空且后台从未成功 -> 明确报错, 便于排查
             if not rows and not _last_refresh["ok"]:
                 self._json(200, rows)
@@ -634,15 +719,25 @@ class Handler(BaseHTTPRequestHandler):
             if not symbols:
                 self._fail(400, "minute 需要 symbols 参数")
                 return
-            period = (qs.get("period") or ["m5"])[0]
+            # 周期: 兼容 period= 和 freq=, 值兼容 "1m" 和 "m1"
+            period = ((qs.get("period") or qs.get("freq")
+                       or ["m5"])[0])
+            # 时间窗: 兼容 start/start_time、end/end_time
+            start = ((qs.get("start") or qs.get("start_time") or [""])[0])
+            end = ((qs.get("end") or qs.get("end_time") or [""])[0])
             try:
                 count = int((qs.get("count") or ["320"])[0])
             except ValueError:
                 count = 320
+            # 显式窗口时不必拉满 320 条, 但 1 分钟要覆盖全天, 至少 240
+            if period and _norm_freq(period) == "m1" and count < 240:
+                count = 320
             rows, errs = [], []
             for s in symbols:
                 try:
-                    rows.extend(fetch_minute(panel_to_tencent(s), period, count))
+                    rows.extend(fetch_minute(
+                        panel_to_tencent(s), period, count, start, end,
+                    ))
                 except Exception as e:  # noqa: BLE001
                     errs.append(f"{s}: {e}")
             if errs:
@@ -667,7 +762,7 @@ def main() -> None:
           flush=True)
 
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"[bridge] v2.1 监听 0.0.0.0:{PORT}", flush=True)
+    print(f"[bridge] v2.3 监听 0.0.0.0:{PORT}", flush=True)
     server.serve_forever()
 
 
